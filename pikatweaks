@@ -1,1 +1,1558 @@
+#requires -Version 5.1
+<#
+    PikaTweaks v3.0
+    Windows Optimization Utility
+    Original implementation
 
+    Features:
+      - Dashboard / system information
+      - Individual tweak selection
+      - One-click optimization
+      - Gaming tweaks
+      - Windows tweaks
+      - Network tools
+      - Cleanup
+      - Privacy controls
+      - Debloat
+      - Power plans
+      - WinGet app installer
+      - Registry backups
+      - Restore point
+      - Restore previous PikaTweaks backup
+      - Logging
+      - Update checker
+#>
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = "SilentlyContinue"
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+$script:PikaVersion = "3.0.0"
+
+$script:PikaRoot   = Join-Path $env:ProgramData "PikaTweaks"
+$script:BackupRoot = Join-Path $script:PikaRoot "Backups"
+$script:LogRoot    = Join-Path $script:PikaRoot "Logs"
+$script:LogFile    = Join-Path $script:LogRoot "PikaTweaks.log"
+
+$script:RawUrl =
+    "https://raw.githubusercontent.com/Gombou2012/PikaTweaks/main/PikaTweaks.ps1"
+
+New-Item -ItemType Directory -Force -Path $script:PikaRoot   | Out-Null
+New-Item -ItemType Directory -Force -Path $script:BackupRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $script:LogRoot    | Out-Null
+
+# ============================================================
+# UI
+# ============================================================
+
+function Write-Pika {
+    param(
+        [string]$Text,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+
+    Write-Host $Text -ForegroundColor $Color
+}
+
+function Write-Line {
+    Write-Host ("-" * 72) -ForegroundColor DarkGray
+}
+
+function Pause-Pika {
+    Write-Host ""
+    Write-Host "Press ENTER to continue..." -ForegroundColor DarkGray
+    [void](Read-Host)
+}
+
+function Show-Header {
+    Clear-Host
+
+    Write-Host ""
+    Write-Host "  ██████╗ ██╗██╗  ██╗ █████╗ " -ForegroundColor Cyan
+    Write-Host "  ██╔══██╗██║██║ ██╔╝██╔══██╗" -ForegroundColor Cyan
+    Write-Host "  ██████╔╝██║█████╔╝ ███████║" -ForegroundColor Blue
+    Write-Host "  ██╔═══╝ ██║██╔═██╗ ██╔══██║" -ForegroundColor Magenta
+    Write-Host "  ██║     ██║██║  ██╗██║  ██║" -ForegroundColor Magenta
+    Write-Host "  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝" -ForegroundColor Cyan
+
+    Write-Host ""
+    Write-Host "              PIKATWEAKS v$script:PikaVersion" `
+        -ForegroundColor White
+    Write-Host "          Windows Optimization Utility" `
+        -ForegroundColor DarkGray
+
+    Write-Line
+}
+
+function Write-Log {
+    param([string]$Message)
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    try {
+        Add-Content -Path $script:LogFile `
+            -Value "[$timestamp] $Message"
+    }
+    catch {}
+}
+
+function Confirm-Pika {
+    param(
+        [string]$Message
+    )
+
+    $answer = Read-Host "$Message [Y/N]"
+
+    return ($answer -match "^(Y|YES)$")
+}
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+function Test-PikaAdmin {
+    try {
+        $identity =
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+
+        $principal =
+            New-Object Security.Principal.WindowsPrincipal($identity)
+
+        return $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
+function Require-Admin {
+    if (Test-PikaAdmin) {
+        return $true
+    }
+
+    Write-Pika ""
+    Write-Pika "Administrator permission is required for this operation." Yellow
+
+    if (-not (Confirm-Pika "Restart PikaTweaks as Administrator?")) {
+        return $false
+    }
+
+    # When running through IEX, PSCommandPath can be unavailable.
+    $scriptPath = $PSCommandPath
+
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        $scriptPath = Join-Path $env:TEMP "PikaTweaks-Elevated.ps1"
+
+        try {
+            Invoke-WebRequest `
+                -Uri $script:RawUrl `
+                -OutFile $scriptPath `
+                -UseBasicParsing
+        }
+        catch {
+            Write-Pika "Could not download PikaTweaks for elevation." Red
+            return $false
+        }
+    }
+
+    try {
+        Start-Process powershell.exe `
+            -Verb RunAs `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+        exit
+    }
+    catch {
+        Write-Pika "Elevation failed." Red
+        return $false
+    }
+}
+
+# ============================================================
+# BACKUP / RESTORE
+# ============================================================
+
+function New-PikaBackup {
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+
+    $folder = Join-Path `
+        $script:BackupRoot `
+        "Backup-$stamp"
+
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+
+    Write-Pika "Creating backup..." Yellow
+
+    $keys = @(
+        @{
+            Name = "GameBar"
+            Path = "HKCU\Software\Microsoft\GameBar"
+        },
+        @{
+            Name = "GameDVR"
+            Path = "HKCU\Software\Microsoft\Windows\CurrentVersion\GameDVR"
+        },
+        @{
+            Name = "Explorer"
+            Path = "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        },
+        @{
+            Name = "ContentDelivery"
+            Path = "HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        }
+    )
+
+    foreach ($key in $keys) {
+        $file = Join-Path $folder "$($key.Name).reg"
+
+        & reg.exe export $key.Path $file /y 2>$null | Out-Null
+    }
+
+    $info = @"
+PikaTweaks Backup
+Version: $script:PikaVersion
+Created: $(Get-Date)
+Computer: $env:COMPUTERNAME
+User: $env:USERNAME
+"@
+
+    $info | Set-Content (Join-Path $folder "BackupInfo.txt")
+
+    Write-Log "Created backup: $folder"
+
+    Write-Pika ""
+    Write-Pika "Backup created:" Green
+    Write-Pika $folder White
+
+    return $folder
+}
+
+function New-PikaRestorePoint {
+    if (-not (Require-Admin)) {
+        return
+    }
+
+    Write-Pika "Creating Windows restore point..." Yellow
+
+    try {
+        Checkpoint-Computer `
+            -Description "PikaTweaks Backup" `
+            -RestorePointType "MODIFY_SETTINGS"
+
+        Write-Pika "Restore point created." Green
+        Write-Log "Created restore point."
+    }
+    catch {
+        Write-Pika "Windows could not create a restore point." Yellow
+    }
+}
+
+function Get-PikaBackups {
+    if (-not (Test-Path $script:BackupRoot)) {
+        return @()
+    }
+
+    return @(Get-ChildItem `
+        -Path $script:BackupRoot `
+        -Directory |
+        Sort-Object LastWriteTime -Descending)
+}
+
+function Restore-PikaBackup {
+    $backups = Get-PikaBackups
+
+    if ($backups.Count -eq 0) {
+        Write-Pika "No PikaTweaks backups found." Yellow
+        Pause-Pika
+        return
+    }
+
+    Write-Pika ""
+    Write-Pika "AVAILABLE BACKUPS" Cyan
+    Write-Line
+
+    for ($i = 0; $i -lt $backups.Count; $i++) {
+        Write-Pika "[$($i + 1)] $($backups[$i].Name)"
+    }
+
+    Write-Pika "[0] Cancel"
+
+    $choice = Read-Host "Select backup"
+
+    if ($choice -eq "0") {
+        return
+    }
+
+    $index = 0
+
+    if (-not [int]::TryParse($choice, [ref]$index)) {
+        return
+    }
+
+    if ($index -lt 1 -or $index -gt $backups.Count) {
+        return
+    }
+
+    $selected = $backups[$index - 1]
+
+    Write-Pika ""
+    Write-Pika "Selected: $($selected.Name)" Yellow
+
+    if (-not (Confirm-Pika "Restore this backup?")) {
+        return
+    }
+
+    if (-not (Require-Admin)) {
+        return
+    }
+
+    $files = Get-ChildItem $selected.FullName -Filter "*.reg"
+
+    foreach ($file in $files) {
+        Write-Pika "Restoring $($file.Name)..." Yellow
+
+        & reg.exe import $file.FullName 2>$null | Out-Null
+    }
+
+    Write-Log "Restored backup: $($selected.FullName)"
+
+    Write-Pika ""
+    Write-Pika "Restore completed." Green
+
+    Pause-Pika
+}
+
+function Backup-Restore-Menu {
+    while ($true) {
+        Show-Header
+
+        Write-Pika "BACKUP / RESTORE" Cyan
+        Write-Line
+
+        Write-Pika "[1] Create registry backup"
+        Write-Pika "[2] Create Windows restore point"
+        Write-Pika "[3] Restore PikaTweaks backup"
+        Write-Pika "[4] Open backup folder"
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        switch ($choice) {
+            "1" {
+                New-PikaBackup | Out-Null
+                Pause-Pika
+            }
+
+            "2" {
+                New-PikaRestorePoint
+                Pause-Pika
+            }
+
+            "3" {
+                Restore-PikaBackup
+            }
+
+            "4" {
+                Start-Process explorer.exe $script:BackupRoot
+            }
+
+            "0" {
+                return
+            }
+        }
+    }
+}
+
+# ============================================================
+# REGISTRY HELPERS
+# ============================================================
+
+function Set-PikaRegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        $Value,
+        [ValidateSet("String","DWord","QWord","Binary")]
+        [string]$Type = "DWord"
+    )
+
+    try {
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force | Out-Null
+        }
+
+        New-ItemProperty `
+            -Path $Path `
+            -Name $Name `
+            -Value $Value `
+            -PropertyType $Type `
+            -Force | Out-Null
+
+        Write-Log "Registry set: $Path\$Name = $Value"
+
+        return $true
+    }
+    catch {
+        Write-Log "Registry failed: $Path\$Name"
+        return $false
+    }
+}
+
+# ============================================================
+# INDIVIDUAL TWEAKS
+# ============================================================
+
+function Tweak-GameMode {
+    Write-Pika "Enabling Game Mode..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\GameBar" `
+        "AutoGameModeEnabled" `
+        1
+
+    Write-Pika "Game Mode enabled." Green
+}
+
+function Tweak-DisableGameDVR {
+    Write-Pika "Disabling Game DVR capture..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" `
+        "AppCaptureEnabled" `
+        0
+
+    Set-PikaRegistryValue `
+        "HKCU:\System\GameConfigStore" `
+        "GameDVR_Enabled" `
+        0
+
+    Write-Pika "Game DVR capture disabled." Green
+}
+
+function Tweak-EnableHAGS {
+    Write-Pika "Enabling Hardware Accelerated GPU Scheduling..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" `
+        "HwSchMode" `
+        2
+
+    Write-Pika "HAGS enabled where supported." Green
+    Write-Pika "A restart may be required." Yellow
+}
+
+function Tweak-DisableHAGS {
+    Write-Pika "Disabling Hardware Accelerated GPU Scheduling..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" `
+        "HwSchMode" `
+        1
+
+    Write-Pika "HAGS disabled." Green
+}
+
+function Tweak-VisualEffects {
+    Write-Pika "Reducing Windows visual effects..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
+        "VisualFXSetting" `
+        2
+
+    Write-Pika "Visual effects profile changed." Green
+}
+
+function Tweak-ExplorerExtensions {
+    Write-Pika "Applying Explorer responsiveness settings..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+        "ShowTaskViewButton" `
+        1
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+        "LaunchTo" `
+        1
+
+    Write-Pika "Explorer settings applied." Green
+}
+
+function Tweak-DisableSuggestions {
+    Write-Pika "Disabling Windows content suggestions..." Yellow
+
+    $path =
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+
+    $values = @(
+        "SystemPaneSuggestionsEnabled",
+        "SubscribedContent-338388Enabled",
+        "SubscribedContent-338389Enabled",
+        "SilentInstalledAppsEnabled"
+    )
+
+    foreach ($name in $values) {
+        Set-PikaRegistryValue $path $name 0
+    }
+
+    Write-Pika "Suggestions reduced." Green
+}
+
+function Tweak-HighPerformance {
+    if (-not (Require-Admin)) {
+        return
+    }
+
+    Write-Pika "Selecting High Performance power plan..." Yellow
+
+    & powercfg.exe /setactive SCHEME_MAX 2>$null
+
+    Write-Pika "High Performance selected." Green
+}
+
+function Tweak-UltimatePerformance {
+    if (-not (Require-Admin)) {
+        return
+    }
+
+    Write-Pika "Preparing Ultimate Performance..." Yellow
+
+    $output = & powercfg.exe `
+        -duplicatescheme `
+        e9a42b02-d5df-448d-aa00-03f14749eb61 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Pika "Ultimate Performance plan created." Green
+    }
+    else {
+        Write-Pika "Ultimate Performance may already exist." Yellow
+    }
+}
+
+function Tweak-CleanTemp {
+    Write-Pika "Cleaning temporary files..." Yellow
+
+    $paths = @(
+        $env:TEMP,
+        "$env:WINDIR\Temp"
+    )
+
+    foreach ($path in $paths) {
+        if (Test-Path $path) {
+            Get-ChildItem `
+                -Path $path `
+                -Force `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Remove-Item `
+                    -Force `
+                    -Recurse `
+                    -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-Pika "Temporary files cleaned." Green
+}
+
+function Tweak-CleanRecycleBin {
+    Write-Pika "Emptying Recycle Bin..." Yellow
+
+    try {
+        Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+        Write-Pika "Recycle Bin emptied." Green
+    }
+    catch {
+        Write-Pika "Recycle Bin cleanup skipped." Yellow
+    }
+}
+
+function Tweak-FlushDNS {
+    Write-Pika "Flushing DNS cache..." Yellow
+
+    & ipconfig.exe /flushdns | Out-Null
+
+    Write-Pika "DNS cache flushed." Green
+}
+
+function Tweak-NetworkReset {
+    if (-not (Require-Admin)) {
+        return
+    }
+
+    Write-Pika "This resets Windows networking components." Yellow
+    Write-Pika "You may need to restart Windows." Yellow
+
+    if (-not (Confirm-Pika "Continue?")) {
+        return
+    }
+
+    & netsh.exe winsock reset | Out-Null
+    & netsh.exe int ip reset | Out-Null
+
+    Write-Pika "Network reset commands completed." Green
+}
+
+function Tweak-Privacy {
+    Write-Pika "Applying basic privacy settings..." Yellow
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" `
+        "Enabled" `
+        0
+
+    Set-PikaRegistryValue `
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" `
+        "TailoredExperiencesWithDiagnosticDataEnabled" `
+        0
+
+    Write-Pika "Basic privacy settings applied." Green
+}
+
+# ============================================================
+# TWEAK DATABASE
+# ============================================================
+
+$script:Tweaks = @(
+    [PSCustomObject]@{
+        Id = 1
+        Name = "Enable Game Mode"
+        Category = "Gaming"
+        Description = "Enables Windows Game Mode."
+        Action = { Tweak-GameMode }
+    },
+
+    [PSCustomObject]@{
+        Id = 2
+        Name = "Disable Game DVR"
+        Category = "Gaming"
+        Description = "Disables Windows background game capture."
+        Action = { Tweak-DisableGameDVR }
+    },
+
+    [PSCustomObject]@{
+        Id = 3
+        Name = "Enable HAGS"
+        Category = "Gaming"
+        Description = "Enables Hardware Accelerated GPU Scheduling."
+        Action = { Tweak-EnableHAGS }
+    },
+
+    [PSCustomObject]@{
+        Id = 4
+        Name = "Disable HAGS"
+        Category = "Gaming"
+        Description = "Disables Hardware Accelerated GPU Scheduling."
+        Action = { Tweak-DisableHAGS }
+    },
+
+    [PSCustomObject]@{
+        Id = 5
+        Name = "High Performance Power Plan"
+        Category = "Performance"
+        Description = "Selects Windows High Performance power plan."
+        Action = { Tweak-HighPerformance }
+    },
+
+    [PSCustomObject]@{
+        Id = 6
+        Name = "Ultimate Performance"
+        Category = "Performance"
+        Description = "Creates the Windows Ultimate Performance plan."
+        Action = { Tweak-UltimatePerformance }
+    },
+
+    [PSCustomObject]@{
+        Id = 7
+        Name = "Reduce Visual Effects"
+        Category = "Windows"
+        Description = "Reduces Windows visual effects."
+        Action = { Tweak-VisualEffects }
+    },
+
+    [PSCustomObject]@{
+        Id = 8
+        Name = "Explorer Settings"
+        Category = "Windows"
+        Description = "Applies basic Explorer settings."
+        Action = { Tweak-ExplorerExtensions }
+    },
+
+    [PSCustomObject]@{
+        Id = 9
+        Name = "Disable Windows Suggestions"
+        Category = "Windows"
+        Description = "Reduces Windows suggestions and promotional content."
+        Action = { Tweak-DisableSuggestions }
+    },
+
+    [PSCustomObject]@{
+        Id = 10
+        Name = "Clean Temporary Files"
+        Category = "Cleanup"
+        Description = "Cleans user and Windows temporary files."
+        Action = { Tweak-CleanTemp }
+    },
+
+    [PSCustomObject]@{
+        Id = 11
+        Name = "Empty Recycle Bin"
+        Category = "Cleanup"
+        Description = "Empties the Windows Recycle Bin."
+        Action = { Tweak-CleanRecycleBin }
+    },
+
+    [PSCustomObject]@{
+        Id = 12
+        Name = "Flush DNS"
+        Category = "Network"
+        Description = "Flushes the Windows DNS resolver cache."
+        Action = { Tweak-FlushDNS }
+    },
+
+    [PSCustomObject]@{
+        Id = 13
+        Name = "Network Reset"
+        Category = "Network"
+        Description = "Resets Winsock and TCP/IP."
+        Action = { Tweak-NetworkReset }
+    },
+
+    [PSCustomObject]@{
+        Id = 14
+        Name = "Basic Privacy"
+        Category = "Privacy"
+        Description = "Reduces advertising and tailored experiences."
+        Action = { Tweak-Privacy }
+    }
+)
+
+# ============================================================
+# TWEAK MENU
+# ============================================================
+
+function Show-TweakList {
+    param(
+        [string]$Category
+    )
+
+    $items = @(
+        $script:Tweaks |
+        Where-Object { $_.Category -eq $Category }
+    )
+
+    if ($items.Count -eq 0) {
+        Write-Pika "No tweaks available." Yellow
+        Pause-Pika
+        return
+    }
+
+    while ($true) {
+        Show-Header
+
+        Write-Pika "$Category TWEAKS" Cyan
+        Write-Line
+
+        foreach ($item in $items) {
+            Write-Pika ("[{0}] {1}" -f $item.Id, $item.Name) White
+            Write-Pika ("    {0}" -f $item.Description) DarkGray
+        }
+
+        Write-Host ""
+        Write-Pika "[A] Apply all $Category tweaks" Green
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        if ($choice -eq "0") {
+            return
+        }
+
+        if ($choice -match "^[Aa]$") {
+            if ($Category -notin @("Cleanup","Network")) {
+                New-PikaBackup | Out-Null
+            }
+
+            foreach ($item in $items) {
+                Write-Pika ""
+                Write-Pika ">>> $($item.Name)" Cyan
+
+                try {
+                    & $item.Action
+                }
+                catch {
+                    Write-Pika "Skipped because an error occurred." Yellow
+                }
+            }
+
+            Pause-Pika
+            continue
+        }
+
+        $selectedId = 0
+
+        if ([int]::TryParse($choice, [ref]$selectedId)) {
+            $selected = $items |
+                Where-Object { $_.Id -eq $selectedId }
+
+            if ($null -ne $selected) {
+
+                if ($Category -notin @("Cleanup","Network")) {
+                    New-PikaBackup | Out-Null
+                }
+
+                Write-Pika ""
+                Write-Pika ">>> $($selected.Name)" Cyan
+
+                try {
+                    & $selected.Action
+                }
+                catch {
+                    Write-Pika "The tweak could not be applied." Red
+                    Write-Log "Tweak failed: $($selected.Name)"
+                }
+
+                Pause-Pika
+            }
+        }
+    }
+}
+
+# ============================================================
+# GAMING
+# ============================================================
+
+function Gaming-Menu {
+    Show-TweakList "Gaming"
+}
+
+# ============================================================
+# WINDOWS
+# ============================================================
+
+function Windows-Tweaks-Menu {
+    Show-TweakList "Windows"
+}
+
+# ============================================================
+# PERFORMANCE
+# ============================================================
+
+function Performance-Menu {
+    Show-TweakList "Performance"
+}
+
+# ============================================================
+# CLEANUP
+# ============================================================
+
+function Cleanup-Menu {
+    Show-TweakList "Cleanup"
+}
+
+# ============================================================
+# NETWORK
+# ============================================================
+
+function Network-Menu {
+    while ($true) {
+        Show-Header
+
+        Write-Pika "NETWORK" Cyan
+        Write-Line
+
+        Write-Pika "[1] Flush DNS"
+        Write-Pika "[2] Network information"
+        Write-Pika "[3] Ping test"
+        Write-Pika "[4] Network reset"
+        Write-Pika "[5] Apply network tweak"
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        switch ($choice) {
+
+            "1" {
+                Tweak-FlushDNS
+                Pause-Pika
+            }
+
+            "2" {
+                Write-Pika ""
+                ipconfig /all
+                Pause-Pika
+            }
+
+            "3" {
+                $hostName = Read-Host "Host/IP"
+
+                if (-not [string]::IsNullOrWhiteSpace($hostName)) {
+                    Test-Connection `
+                        -ComputerName $hostName `
+                        -Count 4
+                }
+
+                Pause-Pika
+            }
+
+            "4" {
+                Tweak-NetworkReset
+                Pause-Pika
+            }
+
+            "5" {
+                Show-TweakList "Network"
+            }
+
+            "0" {
+                return
+            }
+        }
+    }
+}
+
+# ============================================================
+# PRIVACY
+# ============================================================
+
+function Privacy-Menu {
+    Show-TweakList "Privacy"
+}
+
+# ============================================================
+# DEBLOAT
+# ============================================================
+
+function Debloat-Menu {
+    while ($true) {
+        Show-Header
+
+        Write-Pika "DEBLOAT" Cyan
+        Write-Line
+
+        Write-Pika "[1] Remove Clipchamp"
+        Write-Pika "[2] Remove Solitaire Collection"
+        Write-Pika "[3] Remove Xbox App"
+        Write-Pika "[4] Show installed AppX packages"
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        switch ($choice) {
+
+            "1" {
+                if (Confirm-Pika "Remove Clipchamp?") {
+                    Get-AppxPackage "*Clipchamp*" |
+                        Remove-AppxPackage
+
+                    Write-Pika "Clipchamp removal attempted." Green
+                }
+
+                Pause-Pika
+            }
+
+            "2" {
+                if (Confirm-Pika "Remove Solitaire Collection?") {
+                    Get-AppxPackage "*Solitaire*" |
+                        Remove-AppxPackage
+
+                    Write-Pika "Solitaire removal attempted." Green
+                }
+
+                Pause-Pika
+            }
+
+            "3" {
+                if (Confirm-Pika "Remove Xbox App?") {
+                    Get-AppxPackage "*XboxApp*" |
+                        Remove-AppxPackage
+
+                    Write-Pika "Xbox App removal attempted." Green
+                }
+
+                Pause-Pika
+            }
+
+            "4" {
+                Get-AppxPackage |
+                    Sort-Object Name |
+                    Select-Object Name, Version |
+                    Format-Table -AutoSize
+
+                Pause-Pika
+            }
+
+            "0" {
+                return
+            }
+        }
+    }
+}
+
+# ============================================================
+# APP INSTALLER
+# ============================================================
+
+function Test-Winget {
+    return ($null -ne (Get-Command winget.exe -ErrorAction SilentlyContinue))
+}
+
+function Apps-Menu {
+    if (-not (Test-Winget)) {
+        Write-Pika "WinGet is not available." Yellow
+        Write-Pika "Install/update App Installer from Microsoft Store." Yellow
+        Pause-Pika
+        return
+    }
+
+    $apps = @(
+        [PSCustomObject]@{
+            Id = 1
+            Name = "Google Chrome"
+            Package = "Google.Chrome"
+        },
+
+        [PSCustomObject]@{
+            Id = 2
+            Name = "Mozilla Firefox"
+            Package = "Mozilla.Firefox"
+        },
+
+        [PSCustomObject]@{
+            Id = 3
+            Name = "Discord"
+            Package = "Discord.Discord"
+        },
+
+        [PSCustomObject]@{
+            Id = 4
+            Name = "7-Zip"
+            Package = "7zip.7zip"
+        },
+
+        [PSCustomObject]@{
+            Id = 5
+            Name = "VLC"
+            Package = "VideoLAN.VLC"
+        },
+
+        [PSCustomObject]@{
+            Id = 6
+            Name = "Steam"
+            Package = "Valve.Steam"
+        },
+
+        [PSCustomObject]@{
+            Id = 7
+            Name = "Epic Games Launcher"
+            Package = "EpicGames.EpicGamesLauncher"
+        },
+
+        [PSCustomObject]@{
+            Id = 8
+            Name = "OBS Studio"
+            Package = "OBSProject.OBSStudio"
+        }
+    )
+
+    while ($true) {
+        Show-Header
+
+        Write-Pika "APP INSTALLER" Cyan
+        Write-Line
+
+        foreach ($app in $apps) {
+            Write-Pika "[$($app.Id)] $($app.Name)"
+        }
+
+        Write-Pika ""
+        Write-Pika "[9] Search WinGet"
+        Write-Pika "[10] Upgrade installed apps"
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        if ($choice -eq "0") {
+            return
+        }
+
+        if ($choice -eq "9") {
+            $query = Read-Host "Search"
+
+            if (-not [string]::IsNullOrWhiteSpace($query)) {
+                winget search $query
+            }
+
+            Pause-Pika
+            continue
+        }
+
+        if ($choice -eq "10") {
+            if (Confirm-Pika "Upgrade available applications?") {
+                winget upgrade --all
+            }
+
+            Pause-Pika
+            continue
+        }
+
+        $id = 0
+
+        if ([int]::TryParse($choice, [ref]$id)) {
+            $app = $apps |
+                Where-Object { $_.Id -eq $id }
+
+            if ($null -ne $app) {
+
+                Write-Pika ""
+                Write-Pika "Installing $($app.Name)..." Yellow
+
+                winget install `
+                    --id $app.Package `
+                    --exact `
+                    --accept-package-agreements `
+                    --accept-source-agreements
+
+                Write-Pika ""
+                Write-Pika "Installation command completed." Green
+
+                Pause-Pika
+            }
+        }
+    }
+}
+
+# ============================================================
+# MAINTENANCE
+# ============================================================
+
+function Maintenance-Menu {
+    while ($true) {
+        Show-Header
+
+        Write-Pika "MAINTENANCE" Cyan
+        Write-Line
+
+        Write-Pika "[1] System File Checker"
+        Write-Pika "[2] DISM health check"
+        Write-Pika "[3] DISM repair"
+        Write-Pika "[4] Check Windows image"
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        switch ($choice) {
+
+            "1" {
+                if (Require-Admin) {
+                    Write-Pika "Running SFC..." Yellow
+                    sfc.exe /scannow
+                }
+
+                Pause-Pika
+            }
+
+            "2" {
+                if (Require-Admin) {
+                    DISM.exe /Online /Cleanup-Image /CheckHealth
+                }
+
+                Pause-Pika
+            }
+
+            "3" {
+                if (Require-Admin) {
+                    Write-Pika "DISM repair can take some time." Yellow
+
+                    if (Confirm-Pika "Continue?") {
+                        DISM.exe /Online /Cleanup-Image /RestoreHealth
+                    }
+                }
+
+                Pause-Pika
+            }
+
+            "4" {
+                if (Require-Admin) {
+                    DISM.exe /Online /Cleanup-Image /ScanHealth
+                }
+
+                Pause-Pika
+            }
+
+            "0" {
+                return
+            }
+        }
+    }
+}
+
+# ============================================================
+# SYSTEM INFORMATION
+# ============================================================
+
+function Show-SystemInformation {
+    Show-Header
+
+    Write-Pika "SYSTEM INFORMATION" Cyan
+    Write-Line
+
+    try {
+        $computer = Get-CimInstance Win32_ComputerSystem
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cpu = Get-CimInstance Win32_Processor |
+            Select-Object -First 1
+
+        Write-Pika ("Computer       : {0}" -f $env:COMPUTERNAME)
+        Write-Pika ("Windows        : {0}" -f $os.Caption)
+        Write-Pika ("Build          : {0}" -f $os.BuildNumber)
+        Write-Pika ("CPU            : {0}" -f $cpu.Name)
+        Write-Pika ("RAM            : {0:N1} GB" -f
+            ($computer.TotalPhysicalMemory / 1GB))
+        Write-Pika ("Architecture   : {0}" -f $os.OSArchitecture)
+
+        try {
+            $gpu = Get-CimInstance Win32_VideoController |
+                Where-Object { $_.Name -notlike "*Microsoft Basic*" }
+
+            foreach ($card in $gpu) {
+                Write-Pika ("GPU            : {0}" -f $card.Name)
+            }
+        }
+        catch {}
+
+        Write-Pika ""
+        Write-Pika "Power Plan:" Cyan
+
+        powercfg /getactivescheme
+
+        Write-Pika ""
+        Write-Pika "PikaTweaks root:"
+        Write-Pika $script:PikaRoot DarkGray
+    }
+    catch {
+        Write-Pika "Could not read complete system information." Yellow
+    }
+
+    Pause-Pika
+}
+
+# ============================================================
+# WINDOWS SETTINGS
+# ============================================================
+
+function Settings-Menu {
+    while ($true) {
+        Show-Header
+
+        Write-Pika "WINDOWS SETTINGS" Cyan
+        Write-Line
+
+        Write-Pika "[1] Windows Update"
+        Write-Pika "[2] Display settings"
+        Write-Pika "[3] Sound settings"
+        Write-Pika "[4] Network settings"
+        Write-Pika "[5] Apps"
+        Write-Pika "[6] Startup apps"
+        Write-Pika "[7] Windows Security"
+        Write-Pika "[8] System settings"
+        Write-Pika "[0] Back"
+
+        $choice = Read-Host "Select"
+
+        switch ($choice) {
+
+            "1" { Start-Process "ms-settings:windowsupdate" }
+            "2" { Start-Process "ms-settings:display" }
+            "3" { Start-Process "ms-settings:sound" }
+            "4" { Start-Process "ms-settings:network" }
+            "5" { Start-Process "ms-settings:appsfeatures" }
+            "6" { Start-Process "ms-settings:startupapps" }
+            "7" { Start-Process "windowsdefender:" }
+            "8" { Start-Process "ms-settings:system" }
+
+            "0" {
+                return
+            }
+        }
+    }
+}
+
+# ============================================================
+# ONE CLICK OPTIMIZE
+# ============================================================
+
+function One-Click-Optimize {
+
+    Show-Header
+
+    Write-Pika "ONE-CLICK OPTIMIZE" Cyan
+    Write-Line
+
+    Write-Pika "Recommended safe optimization profile:" White
+    Write-Pika ""
+    Write-Pika "[1] Create backup"
+    Write-Pika "[2] Create restore point"
+    Write-Pika "[3] Enable Game Mode"
+    Write-Pika "[4] Disable Game DVR"
+    Write-Pika "[5] High Performance power plan"
+    Write-Pika "[6] Clean temporary files"
+    Write-Pika "[7] Flush DNS"
+    Write-Pika "[8] Reduce Windows suggestions"
+    Write-Pika ""
+
+    Write-Pika "This does NOT overclock your hardware." DarkGray
+    Write-Pika "It does NOT disable Windows Security." DarkGray
+    Write-Pika ""
+
+    if (-not (Confirm-Pika "Run One-Click Optimize?")) {
+        return
+    }
+
+    Write-Pika ""
+    Write-Pika "Starting optimization..." Cyan
+
+    # Backup
+    New-PikaBackup | Out-Null
+
+    # Restore point
+    New-PikaRestorePoint
+
+    # Tweaks
+    Tweak-GameMode
+    Tweak-DisableGameDVR
+    Tweak-HighPerformance
+    Tweak-CleanTemp
+    Tweak-FlushDNS
+    Tweak-DisableSuggestions
+
+    Write-Log "One-Click Optimize completed."
+
+    Write-Pika ""
+    Write-Line
+    Write-Pika "OPTIMIZATION COMPLETE" Green
+    Write-Line
+
+    Write-Pika "A restart is recommended." Yellow
+
+    if (Confirm-Pika "Restart Windows now?") {
+        Restart-Computer
+    }
+
+    Pause-Pika
+}
+
+# ============================================================
+# UPDATE CHECK
+# ============================================================
+
+function Update-PikaTweaks {
+
+    Show-Header
+
+    Write-Pika "PIKATWEAKS UPDATE" Cyan
+    Write-Line
+
+    Write-Pika "Current version: $script:PikaVersion"
+    Write-Pika "Checking GitHub..." Yellow
+
+    try {
+        $remote = Invoke-WebRequest `
+            -Uri $script:RawUrl `
+            -UseBasicParsing `
+            -TimeoutSec 10
+
+        if ($remote.StatusCode -eq 200) {
+            Write-Pika ""
+            Write-Pika "GitHub version is available." Green
+            Write-Pika "Review the remote script before executing it." Yellow
+
+            if (Confirm-Pika "Download latest PikaTweaks.ps1?") {
+
+                $destination = Join-Path `
+                    $env:USERPROFILE `
+                    "Downloads\PikaTweaks.ps1"
+
+                $remote.Content |
+                    Set-Content `
+                        -Path $destination `
+                        -Encoding UTF8
+
+                Write-Pika ""
+                Write-Pika "Downloaded to:" Green
+                Write-Pika $destination White
+            }
+        }
+    }
+    catch {
+        Write-Pika "Could not check GitHub." Red
+    }
+
+    Pause-Pika
+}
+
+# ============================================================
+# ABOUT
+# ============================================================
+
+function About-PikaTweaks {
+    Show-Header
+
+    Write-Pika "ABOUT PIKATWEAKS" Cyan
+    Write-Line
+
+    Write-Pika "PikaTweaks v$script:PikaVersion"
+    Write-Pika "Windows optimization utility"
+    Write-Pika ""
+    Write-Pika "Designed for gaming PCs and everyday Windows systems."
+    Write-Pika ""
+    Write-Pika "Features:"
+    Write-Pika "  • Gaming optimization"
+    Write-Pika "  • Windows tweaks"
+    Write-Pika "  • Network tools"
+    Write-Pika "  • Cleanup"
+    Write-Pika "  • Privacy"
+    Write-Pika "  • Debloat"
+    Write-Pika "  • Power plans"
+    Write-Pika "  • App installer"
+    Write-Pika "  • Backup / Restore"
+    Write-Pika "  • One-click optimization"
+    Write-Pika ""
+    Write-Pika "GitHub:"
+    Write-Pika $script:RawUrl DarkGray
+
+    Pause-Pika
+}
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+function Main-Menu {
+
+    while ($true) {
+
+        Show-Header
+
+        Write-Pika "MAIN MENU" Cyan
+        Write-Line
+
+        Write-Pika "[1]  Dashboard / System Information"
+        Write-Pika "[2]  ONE-CLICK OPTIMIZE" Green
+        Write-Pika ""
+        Write-Pika "[3]  Gaming Tweaks"
+        Write-Pika "[4]  Windows Tweaks"
+        Write-Pika "[5]  Network"
+        Write-Pika "[6]  Cleanup"
+        Write-Pika "[7]  Privacy"
+        Write-Pika "[8]  Debloat"
+        Write-Pika "[9]  Performance / Power"
+        Write-Pika ""
+        Write-Pika "[10] App Installer"
+        Write-Pika "[11] Maintenance"
+        Write-Pika "[12] Windows Settings"
+        Write-Pika "[13] Backup / Restore"
+        Write-Pika "[14] Create Restore Point"
+        Write-Pika "[15] Update PikaTweaks"
+        Write-Pika "[16] About"
+        Write-Pika ""
+        Write-Pika "[0]  Exit"
+
+        Write-Host ""
+
+        $choice = Read-Host "PikaTweaks"
+
+        switch ($choice) {
+
+            "1" {
+                Show-SystemInformation
+            }
+
+            "2" {
+                One-Click-Optimize
+            }
+
+            "3" {
+                Gaming-Menu
+            }
+
+            "4" {
+                Windows-Tweaks-Menu
+            }
+
+            "5" {
+                Network-Menu
+            }
+
+            "6" {
+                Cleanup-Menu
+            }
+
+            "7" {
+                Privacy-Menu
+            }
+
+            "8" {
+                Debloat-Menu
+            }
+
+            "9" {
+                Performance-Menu
+            }
+
+            "10" {
+                Apps-Menu
+            }
+
+            "11" {
+                Maintenance-Menu
+            }
+
+            "12" {
+                Settings-Menu
+            }
+
+            "13" {
+                Backup-Restore-Menu
+            }
+
+            "14" {
+                New-PikaRestorePoint
+                Pause-Pika
+            }
+
+            "15" {
+                Update-PikaTweaks
+            }
+
+            "16" {
+                About-PikaTweaks
+            }
+
+            "0" {
+                Write-Pika ""
+                Write-Pika "Thanks for using PikaTweaks." Cyan
+                Write-Log "PikaTweaks exited."
+                return
+            }
+
+            default {
+                Write-Pika "Invalid option." Red
+                Start-Sleep -Milliseconds 700
+            }
+        }
+    }
+}
+
+# ============================================================
+# START
+# ============================================================
+
+Write-Log "PikaTweaks v$script:PikaVersion started."
+
+Main-Menu
